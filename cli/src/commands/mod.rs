@@ -2030,6 +2030,15 @@ fn create_description_file(
     })
 }
 
+fn read_description_file(description_file_path: &PathBuf) -> Result<String, CommandError> {
+    fs::read_to_string(description_file_path).map_err(|e| {
+        user_error(format!(
+            r#"Failed to read description file "{path}": {e}"#,
+            path = description_file_path.display()
+        ))
+    })
+}
+
 fn edit_description(
     repo: &ReadonlyRepo,
     description: &str,
@@ -2039,12 +2048,7 @@ fn edit_description(
 
     run_ui_editor(settings, &description_file_path)?;
 
-    let description = fs::read_to_string(&description_file_path).map_err(|e| {
-        user_error(format!(
-            r#"Failed to read description file "{path}": {e}"#,
-            path = description_file_path.display()
-        ))
-    })?;
+    let description = read_description_file(&description_file_path)?;
     // Delete the file only if everything went well.
     // TODO: Tell the user the name of the file we left behind.
     std::fs::remove_file(description_file_path).ok();
