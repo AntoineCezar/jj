@@ -19,7 +19,8 @@ mod debug;
 mod git;
 mod operation;
 
-use std::collections::{BTreeMap, HashSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -2065,6 +2066,123 @@ fn edit_description(
     Ok(normalize_description(description))
 }
 
+fn create_description_bulk(
+    commits: &IndexSet<Commit>,
+    ui: &mut Ui,
+    settings: &UserSettings,
+    workspace_command: &WorkspaceCommandHelper,
+) -> Result<String, CommandError> {
+    let mut descriptions = Vec::new();
+    for commit in commits.iter() {
+        let template = description_template_for_commit(ui, settings, workspace_command, commit)?;
+        descriptions.push(format!(
+            "JJ: describe {}\n{}",
+            commit.change_id().hex(),
+            template
+        ))
+    }
+    Ok(descriptions.iter().join("\n"))
+}
+
+fn parse_description_bulk<'a>(
+    commits: &'a IndexSet<Commit>,
+    description: &str,
+) -> Result<HashMap<&'a Commit, String>, CommandError> {
+    let mut commit_by_change_id = HashMap::new();
+    for commit in commits {
+        commit_by_change_id.insert(commit.change_id().hex().to_string(), commit);
+    }
+
+    // single commit: add separator omitted on purpose for user convenience
+    // if not already added by user.
+    let description = if commits.len() == 1 {
+        if description.starts_with("JJ: describe ") {
+            Cow::Borrowed(description)
+        } else if let Some(commit) = commits.first() {
+            Cow::Owned(format!(
+                "JJ: describe {}\n{}",
+                commit.change_id().hex(),
+                description
+            ))
+        } else {
+            unreachable!() // ok as we checked that there is exactly 1 commit
+        }
+    } else {
+        Cow::Borrowed(description)
+    };
+
+    let mut duplicated = Vec::new();
+    let mut unexpected = Vec::new();
+    let mut descriptions = HashMap::new();
+
+    let description_by_change_id = description
+        .split("JJ: describe ")
+        .filter_map(|section| section.split_once('\n')) // discard sections without change id
+        .map(|(change_id, description)| (change_id.trim(), description));
+
+    for (change_id, description) in description_by_change_id {
+        if let Some(&commit) = commit_by_change_id.get(change_id) {
+            if descriptions.contains_key(commit) {
+                duplicated.push(change_id);
+            } else {
+                descriptions.insert(commit, normalize_description(description.to_owned()));
+            }
+        } else {
+            unexpected.push(change_id);
+        }
+    }
+
+    let mut err = Vec::new();
+    if !duplicated.is_empty() {
+        err.push(format!("Duplicated changes: {}", duplicated.join(", ")));
+    }
+    if !unexpected.is_empty() {
+        err.push(format!("Unexpected changes: {}", unexpected.join(", ")));
+    }
+
+    if err.is_empty() {
+        Ok(descriptions)
+    } else {
+        Err(user_error(err.join("\n")))
+    }
+}
+
+fn edit_description_bulk<'a>(
+    repo: &ReadonlyRepo,
+    commits: &'a IndexSet<Commit>,
+    ui: &mut Ui,
+    settings: &UserSettings,
+    workspace_command: &WorkspaceCommandHelper,
+) -> Result<HashMap<&'a Commit, String>, CommandError> {
+    // single commit: omit separator for user convenience
+    // the parsing will handle the single commit case appropriately
+    let description = if commits.len() == 1 {
+        let commit = commits.first().unwrap(); // unwrap is ok as we checked that there is exactly 1 commit
+        Cow::Borrowed(commit.description())
+    } else {
+        Cow::Owned(create_description_bulk(
+            commits,
+            ui,
+            settings,
+            workspace_command,
+        )?)
+    };
+
+    let description_file_path = create_description_file(repo, &description)?;
+
+    run_ui_editor(settings, &description_file_path)?;
+
+    let description = read_description_file(&description_file_path)?;
+
+    let result = parse_description_bulk(commits, &description);
+    // Delete the file only if everything went well.
+    // TODO: Tell the user the name of the file we left behind.
+    if result.is_ok() {
+        std::fs::remove_file(description_file_path).ok();
+    }
+    result
+}
+
 fn edit_sparse(
     workspace_root: &Path,
     repo_path: &Path,
@@ -2139,37 +2257,65 @@ fn cmd_describe(
     args: &DescribeArgs,
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
-    let commit = workspace_command.resolve_single_rev(&args.revision, ui)?;
-    workspace_command.check_rewritable([&commit])?;
-    let description = if args.stdin {
-        let mut buffer = String::new();
-        io::stdin().read_to_string(&mut buffer).unwrap();
-        buffer
-    } else if !args.message_paragraphs.is_empty() {
-        cli_util::join_message_paragraphs(&args.message_paragraphs)
-    } else if args.no_edit {
-        commit.description().to_owned()
-    } else {
-        let template =
-            description_template_for_commit(ui, command.settings(), &workspace_command, &commit)?;
-        edit_description(workspace_command.repo(), &template, command.settings())?
-    };
-    if description == *commit.description() && !args.reset_author {
-        writeln!(ui.stderr(), "Nothing changed.")?;
-    } else {
-        let mut tx =
-            workspace_command.start_transaction(&format!("describe commit {}", commit.id().hex()));
-        let mut commit_builder = tx
-            .mut_repo()
-            .rewrite_commit(command.settings(), &commit)
-            .set_description(description);
-        if args.reset_author {
-            let new_author = commit_builder.committer().clone();
-            commit_builder = commit_builder.set_author(new_author);
-        }
-        commit_builder.write()?;
-        tx.finish(ui)?;
+    let commits =
+        resolve_multiple_nonempty_revsets(&[args.revision.clone()], &workspace_command, ui)?;
+    if commits
+        .iter()
+        .any(|commit| commit.id() == workspace_command.repo().store().root_commit_id())
+    {
+        return Err(user_error("Cannot describe the root commit"));
     }
+    workspace_command.check_rewritable(&commits)?;
+
+    let description_by_commit = if args.stdin {
+        writeln!(ui.stderr(), "> stdin")?;
+        let mut bulk_description = String::new();
+        io::stdin().read_to_string(&mut bulk_description).unwrap();
+        parse_description_bulk(&commits, &bulk_description)?
+    } else if !args.message_paragraphs.is_empty() {
+        writeln!(ui.stderr(), "> message_paragraphs")?;
+        let bulk_description = cli_util::join_message_paragraphs(&args.message_paragraphs);
+        parse_description_bulk(&commits, &bulk_description)?
+    } else if args.no_edit {
+        writeln!(ui.stderr(), "> no_edit")?;
+        let mut description_by_commit = HashMap::new();
+        for commit in commits.iter() {
+            description_by_commit.insert(commit, commit.description().to_owned());
+        }
+        description_by_commit
+    } else {
+        writeln!(ui.stderr(), "> edit_description_bulk")?;
+        edit_description_bulk(
+            workspace_command.repo(),
+            &commits,
+            ui,
+            command.settings(),
+            &workspace_command,
+        )?
+    };
+
+    let mut summary = Vec::new();
+    for (commit, description) in description_by_commit.iter() {
+        if description == commit.description() && !args.reset_author {
+            summary.push(format!("{} Nothing changed.", commit.change_id().hex()))
+        } else {
+            summary.push(format!("{} Changed.", commit.change_id().hex()));
+            let mut tx = workspace_command
+                .start_transaction(&format!("describe commit {}", commit.id().hex()));
+            let mut commit_builder = tx
+                .mut_repo()
+                .rewrite_commit(command.settings(), &commit)
+                .set_description(description);
+            if args.reset_author {
+                let new_author = commit_builder.committer().clone();
+                commit_builder = commit_builder.set_author(new_author);
+            }
+            commit_builder.write()?;
+            tx.finish(ui)?;
+        }
+    }
+    writeln!(ui.stderr(), "{}", summary.iter().join("\n"))?;
+
     Ok(())
 }
 
