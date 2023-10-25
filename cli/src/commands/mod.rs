@@ -2039,6 +2039,15 @@ fn read_description_file(description_file_path: &PathBuf) -> Result<String, Comm
     })
 }
 
+fn normalize_description(description: String) -> String {
+    // Normalize line ending, remove leading and trailing blank lines.
+    let description = description
+        .lines()
+        .filter(|line| !line.starts_with("JJ: "))
+        .join("\n");
+    text_util::complete_newline(description.trim_matches('\n'))
+}
+
 fn edit_description(
     repo: &ReadonlyRepo,
     description: &str,
@@ -2052,12 +2061,8 @@ fn edit_description(
     // Delete the file only if everything went well.
     // TODO: Tell the user the name of the file we left behind.
     std::fs::remove_file(description_file_path).ok();
-    // Normalize line ending, remove leading and trailing blank lines.
-    let description = description
-        .lines()
-        .filter(|line| !line.starts_with("JJ: "))
-        .join("\n");
-    Ok(text_util::complete_newline(description.trim_matches('\n')))
+
+    Ok(normalize_description(description))
 }
 
 fn edit_sparse(
