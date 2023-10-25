@@ -22,7 +22,7 @@ mod operation;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
 use std::io::{BufRead, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fmt, fs, io};
 
@@ -2008,12 +2008,11 @@ fn rebase_to_dest_parent(
     }
 }
 
-fn edit_description(
+fn create_description_file(
     repo: &ReadonlyRepo,
     description: &str,
-    settings: &UserSettings,
-) -> Result<String, CommandError> {
-    let description_file_path = (|| -> Result<_, io::Error> {
+) -> Result<PathBuf, CommandError> {
+    (|| -> Result<_, io::Error> {
         let mut file = tempfile::Builder::new()
             .prefix("editor-")
             .suffix(".jjdescription")
@@ -2028,7 +2027,15 @@ fn edit_description(
             r#"Failed to create description file in "{path}": {e}"#,
             path = repo.repo_path().display()
         ))
-    })?;
+    })
+}
+
+fn edit_description(
+    repo: &ReadonlyRepo,
+    description: &str,
+    settings: &UserSettings,
+) -> Result<String, CommandError> {
+    let description_file_path = create_description_file(repo, description)?;
 
     run_ui_editor(settings, &description_file_path)?;
 
