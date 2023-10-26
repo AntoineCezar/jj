@@ -17,6 +17,7 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 use std::io::Write;
 use std::iter::zip;
@@ -104,10 +105,25 @@ where
 /// There is exactly one more `adds()` than `removes()`. When interpreted as a
 /// series of diffs, the merge's (i+1)-st add is matched with the i-th
 /// remove. The zeroth add is considered a diff from the non-existent state.
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone)]
 pub struct Merge<T> {
     removes: Vec<T>,
     adds: Vec<T>,
+}
+
+impl<T: Debug> Debug for Merge<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        // Format like an enum with two variants to make it less verbose in the common
+        // case of a resolved state.
+        if self.removes.is_empty() {
+            f.debug_tuple("Resolved").field(&self.adds[0]).finish()
+        } else {
+            f.debug_struct("Conflicted")
+                .field("removes", &self.removes)
+                .field("adds", &self.adds)
+                .finish()
+        }
+    }
 }
 
 impl<T> Merge<T> {
@@ -398,7 +414,13 @@ impl<T: ContentHash> ContentHash for Merge<T> {
     }
 }
 
-impl Merge<Option<TreeValue>> {
+/// The value at a given path in a commit. It depends on the context whether it
+/// can be absent (`Merge::is_absent()`). For example, when getting the value at
+/// a specific path, it may be, but when iterating over entries in a tree, it
+/// shouldn't be.
+pub type MergedTreeValue = Merge<Option<TreeValue>>;
+
+impl MergedTreeValue {
     /// Create a `Merge` from a `backend::Conflict`, padding with `None` to
     /// make sure that there is exactly one more `adds()` than `removes()`.
     pub fn from_backend_conflict(conflict: backend::Conflict) -> Self {
@@ -431,15 +453,14 @@ impl Merge<Option<TreeValue>> {
                 .all(|value| matches!(value, Some(TreeValue::Tree(_)) | None))
     }
 
-    /// If this merge contains only non-executable files or absent entries,
-    /// returns a merge of the `FileId`s`.
+    /// If this merge contains only files or absent entries, returns a merge of
+    /// the `FileId`s`. The executable bits will be ignored. Use
+    /// `Merge::with_new_file_ids()` to produce a new merge with the original
+    /// executable bits preserved.
     pub fn to_file_merge(&self) -> Option<Merge<Option<FileId>>> {
         self.maybe_map(|term| match term {
             None => Some(None),
-            Some(TreeValue::File {
-                id,
-                executable: false,
-            }) => Some(Some(id.clone())),
+            Some(TreeValue::File { id, executable: _ }) => Some(Some(id.clone())),
             _ => None,
         })
     }
@@ -482,7 +503,7 @@ impl<T> Merge<Option<T>>
 where
     T: Borrow<TreeValue>,
 {
-    /// If every non-`None` term of a `Merge<Option<TreeValue>>`
+    /// If every non-`None` term of a `MergedTreeValue`
     /// is a `TreeValue::Tree`, this converts it to
     /// a `Merge<Tree>`, with empty trees instead of
     /// any `None` terms. Otherwise, returns `None`.

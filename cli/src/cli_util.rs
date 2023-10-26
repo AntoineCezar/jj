@@ -57,6 +57,7 @@ use jj_lib::revset::{
     RevsetParseErrorKind, RevsetResolutionError, RevsetWorkspaceContext,
 };
 use jj_lib::settings::{ConfigResultExt as _, UserSettings};
+use jj_lib::str_util::{StringPattern, StringPatternParseError};
 use jj_lib::transaction::Transaction;
 use jj_lib::tree::TreeMergeError;
 use jj_lib::working_copy::{
@@ -376,12 +377,6 @@ impl From<TemplateParseError> for CommandError {
 impl From<FsPathParseError> for CommandError {
     fn from(err: FsPathParseError) -> Self {
         user_error(format!("{err}"))
-    }
-}
-
-impl From<glob::PatternError> for CommandError {
-    fn from(err: glob::PatternError) -> Self {
-        user_error(format!("Failed to compile glob: {err}"))
     }
 }
 
@@ -1572,7 +1567,8 @@ impl WorkspaceCommandTransaction<'_> {
             Ok(right_tree.id().clone())
         } else {
             let mut tree_builder = MergedTreeBuilder::new(left_tree.id().clone());
-            for (repo_path, _left, right) in left_tree.diff(right_tree, matcher) {
+            for (repo_path, diff) in left_tree.diff(right_tree, matcher) {
+                let (_left, right) = diff?;
                 tree_builder.set_or_remove(repo_path, right);
             }
             Ok(tree_builder.write_tree(self.repo().store())?)
@@ -1855,6 +1851,14 @@ fn expand_git_path(path_str: String) -> PathBuf {
         }
     }
     PathBuf::from(path_str)
+}
+
+pub fn parse_string_pattern(src: &str) -> Result<StringPattern, StringPatternParseError> {
+    if let Some((kind, pat)) = src.split_once(':') {
+        StringPattern::from_str_kind(pat, kind)
+    } else {
+        Ok(StringPattern::exact(src))
+    }
 }
 
 pub fn resolve_op_for_load(

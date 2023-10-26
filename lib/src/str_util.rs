@@ -14,8 +14,9 @@
 
 //! String helpers.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::collections::BTreeMap;
+use std::fmt;
 
 use either::Either;
 use thiserror::Error;
@@ -49,6 +50,11 @@ impl StringPattern {
         StringPattern::Substring(String::new())
     }
 
+    /// Creates pattern that matches exactly.
+    pub fn exact(src: impl Into<String>) -> Self {
+        StringPattern::Exact(src.into())
+    }
+
     /// Parses the given string as glob pattern.
     pub fn glob(src: &str) -> Result<Self, StringPatternParseError> {
         // TODO: might be better to do parsing and compilation separately since
@@ -61,11 +67,16 @@ impl StringPattern {
     /// Parses the given string as pattern of the specified `kind`.
     pub fn from_str_kind(src: &str, kind: &str) -> Result<Self, StringPatternParseError> {
         match kind {
-            "exact" => Ok(StringPattern::Exact(src.to_owned())),
+            "exact" => Ok(StringPattern::exact(src)),
             "glob" => StringPattern::glob(src),
             "substring" => Ok(StringPattern::Substring(src.to_owned())),
             _ => Err(StringPatternParseError::InvalidKind(kind.to_owned())),
         }
+    }
+
+    /// Returns true if this pattern matches input strings exactly.
+    pub fn is_exact(&self) -> bool {
+        self.as_exact().is_some()
     }
 
     /// Returns a literal pattern if this should match input strings exactly.
@@ -75,6 +86,29 @@ impl StringPattern {
         match self {
             StringPattern::Exact(literal) => Some(literal),
             StringPattern::Glob(_) | StringPattern::Substring(_) => None,
+        }
+    }
+
+    /// Returns the original string of this pattern.
+    pub fn as_str(&self) -> &str {
+        match self {
+            StringPattern::Exact(literal) => literal,
+            StringPattern::Glob(pattern) => pattern.as_str(),
+            StringPattern::Substring(needle) => needle,
+        }
+    }
+
+    /// Converts this pattern to a glob string. Returns `None` if the pattern
+    /// can't be represented as a glob.
+    pub fn to_glob(&self) -> Option<Cow<'_, str>> {
+        // TODO: If we add Regex pattern, it will return None.
+        match self {
+            StringPattern::Exact(literal) => Some(glob::Pattern::escape(literal).into()),
+            StringPattern::Glob(pattern) => Some(pattern.as_str().into()),
+            StringPattern::Substring(needle) if needle.is_empty() => Some("*".into()),
+            StringPattern::Substring(needle) => {
+                Some(format!("*{}*", glob::Pattern::escape(needle)).into())
+            }
         }
     }
 
@@ -97,5 +131,36 @@ impl StringPattern {
         } else {
             Either::Right(map.iter().filter(|&(key, _)| self.matches(key.borrow())))
         }
+    }
+}
+
+impl fmt::Display for StringPattern {
+    /// Shows the original string of this pattern.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_string_pattern_to_glob() {
+        assert_eq!(StringPattern::everything().to_glob(), Some("*".into()));
+        assert_eq!(StringPattern::exact("a").to_glob(), Some("a".into()));
+        assert_eq!(StringPattern::exact("*").to_glob(), Some("[*]".into()));
+        assert_eq!(
+            StringPattern::glob("*").unwrap().to_glob(),
+            Some("*".into())
+        );
+        assert_eq!(
+            StringPattern::Substring("a".into()).to_glob(),
+            Some("*a*".into())
+        );
+        assert_eq!(
+            StringPattern::Substring("*".into()).to_glob(),
+            Some("*[*]*".into())
+        );
     }
 }

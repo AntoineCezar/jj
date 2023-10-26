@@ -24,27 +24,63 @@ use crate::op_store::{RefTarget, RemoteRef};
 /// Compares `refs1` and `refs2` targets, yields entry if they differ.
 ///
 /// `refs1` and `refs2` must be sorted by `K`.
-pub fn diff_named_refs<'a, 'b, K: Ord>(
+pub fn diff_named_ref_targets<'a, 'b, K: Ord>(
     refs1: impl IntoIterator<Item = (K, &'a RefTarget)>,
     refs2: impl IntoIterator<Item = (K, &'b RefTarget)>,
 ) -> impl Iterator<Item = (K, (&'a RefTarget, &'b RefTarget))> {
-    iter_named_ref_pairs(refs1, refs2).filter(|(_, (target1, target2))| target1 != target2)
+    iter_named_pairs(
+        refs1,
+        refs2,
+        || RefTarget::absent_ref(),
+        || RefTarget::absent_ref(),
+    )
+    .filter(|(_, (target1, target2))| target1 != target2)
 }
 
-/// Iterates `refs1` and `refs2` target pairs by name.
+/// Compares remote `refs1` and `refs2` pairs, yields entry if they differ.
 ///
 /// `refs1` and `refs2` must be sorted by `K`.
-fn iter_named_ref_pairs<'a, 'b, K: Ord>(
+pub fn diff_named_remote_refs<'a, 'b, K: Ord>(
+    refs1: impl IntoIterator<Item = (K, &'a RemoteRef)>,
+    refs2: impl IntoIterator<Item = (K, &'b RemoteRef)>,
+) -> impl Iterator<Item = (K, (&'a RemoteRef, &'b RemoteRef))> {
+    iter_named_pairs(
+        refs1,
+        refs2,
+        || RemoteRef::absent_ref(),
+        || RemoteRef::absent_ref(),
+    )
+    .filter(|(_, (ref1, ref2))| ref1 != ref2)
+}
+
+/// Iterates local `refs1` and remote `refs2` pairs by name.
+///
+/// `refs1` and `refs2` must be sorted by `K`.
+pub fn iter_named_local_remote_refs<'a, 'b, K: Ord>(
     refs1: impl IntoIterator<Item = (K, &'a RefTarget)>,
-    refs2: impl IntoIterator<Item = (K, &'b RefTarget)>,
-) -> impl Iterator<Item = (K, (&'a RefTarget, &'b RefTarget))> {
-    itertools::merge_join_by(refs1, refs2, |(name1, _), (name2, _)| name1.cmp(name2)).map(|entry| {
-        match entry {
+    refs2: impl IntoIterator<Item = (K, &'b RemoteRef)>,
+) -> impl Iterator<Item = (K, (&'a RefTarget, &'b RemoteRef))> {
+    iter_named_pairs(
+        refs1,
+        refs2,
+        || RefTarget::absent_ref(),
+        || RemoteRef::absent_ref(),
+    )
+}
+
+fn iter_named_pairs<K: Ord, V1, V2>(
+    refs1: impl IntoIterator<Item = (K, V1)>,
+    refs2: impl IntoIterator<Item = (K, V2)>,
+    absent_ref1: impl Fn() -> V1,
+    absent_ref2: impl Fn() -> V2,
+) -> impl Iterator<Item = (K, (V1, V2))> {
+    itertools::merge_join_by(refs1, refs2, |(name1, _), (name2, _)| name1.cmp(name2)).map(
+        move |entry| match entry {
             EitherOrBoth::Both((name, target1), (_, target2)) => (name, (target1, target2)),
-            EitherOrBoth::Left((name, target1)) => (name, (target1, RefTarget::absent_ref())),
-            EitherOrBoth::Right((name, target2)) => (name, (RefTarget::absent_ref(), target2)),
-        }
-    })
+            EitherOrBoth::Left((name, target1)) => (name, (target1, absent_ref2())),
+            EitherOrBoth::Right((name, target2)) => (name, (absent_ref1(), target2)),
+        },
+    )
 }
 
 pub fn merge_ref_targets(
@@ -70,6 +106,25 @@ pub fn merge_ref_targets(
         let merge = merge_ref_targets_non_trivial(index, merge);
         RefTarget::from_merge(merge)
     }
+}
+
+pub fn merge_remote_refs(
+    index: &dyn Index,
+    left: &RemoteRef,
+    base: &RemoteRef,
+    right: &RemoteRef,
+) -> RemoteRef {
+    // Just merge target and state fields separately. Strictly speaking, merging
+    // target-only change and state-only change shouldn't automatically mark the
+    // new target as tracking. However, many faulty merges will end up in local
+    // or remote target conflicts (since fast-forwardable move can be safely
+    // "tracked"), and the conflicts will require user intervention anyway. So
+    // there wouldn't be much reason to handle these merges precisely.
+    let target = merge_ref_targets(index, &left.target, &base.target, &right.target);
+    // Merged state shouldn't conflict atm since we only have two states, but if
+    // it does, keep the original state. The choice is arbitrary.
+    let state = *trivial_merge(&[base.state], &[left.state, right.state]).unwrap_or(&base.state);
+    RemoteRef { target, state }
 }
 
 fn merge_ref_targets_non_trivial(

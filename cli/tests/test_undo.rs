@@ -72,7 +72,7 @@ fn test_git_push_undo() {
     //    remote-tracking  | AA      |   AA   | AA
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 8c05de15 (empty) BB
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 0cffb614 (empty) AA
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 0cffb614 (empty) AA
     "###);
     let pre_push_opid = test_env.current_operation_id(&repo_path);
     test_env.jj_cmd_ok(&repo_path, &["git", "push"]);
@@ -97,7 +97,7 @@ fn test_git_push_undo() {
     //    remote-tracking  | AA      |   AA   | BB
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 8c05de15 (empty) BB
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 0cffb614 (empty) AA
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 0cffb614 (empty) AA
     "###);
     test_env.advance_test_rng_seed_to_multiple_of(100_000);
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "CC"]);
@@ -112,7 +112,7 @@ fn test_git_push_undo() {
     // git fetch && jj undo && jj git fetch` would become a no-op.
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main (conflicted):
-      - qpvuntsm 0cffb614 (empty) AA
+      - qpvuntsm hidden 0cffb614 (empty) AA
       + qpvuntsm 0a3e99f0 (empty) CC
       + qpvuntsm 8c05de15 (empty) BB
       @origin (behind by 1 commits): qpvuntsm 8c05de15 (empty) BB
@@ -145,7 +145,7 @@ fn test_git_push_undo_with_import() {
     //    remote-tracking  | AA      |   AA   | AA
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 8c05de15 (empty) BB
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 0cffb614 (empty) AA
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 0cffb614 (empty) AA
     "###);
     let pre_push_opid = test_env.current_operation_id(&repo_path);
     test_env.jj_cmd_ok(&repo_path, &["git", "push"]);
@@ -170,7 +170,7 @@ fn test_git_push_undo_with_import() {
     //    remote-tracking  | AA      |   AA   | BB
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 8c05de15 (empty) BB
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 0cffb614 (empty) AA
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 0cffb614 (empty) AA
     "###);
 
     // PROBLEM: inserting this import changes the outcome compared to previous test
@@ -194,7 +194,7 @@ fn test_git_push_undo_with_import() {
     // was essentially a no-op.
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 0a3e99f0 (empty) CC
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 8c05de15 (empty) BB
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 8c05de15 (empty) BB
     "###);
 }
 
@@ -226,7 +226,7 @@ fn test_git_push_undo_colocated() {
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 8c05de15 (empty) BB
       @git: qpvuntsm 8c05de15 (empty) BB
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 0cffb614 (empty) AA
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 0cffb614 (empty) AA
     "###);
     let pre_push_opid = test_env.current_operation_id(&repo_path);
     test_env.jj_cmd_ok(&repo_path, &["git", "push"]);
@@ -261,7 +261,7 @@ fn test_git_push_undo_colocated() {
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 8c05de15 (empty) BB
       @git: qpvuntsm 8c05de15 (empty) BB
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 0cffb614 (empty) AA
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 0cffb614 (empty) AA
     "###);
     test_env.advance_test_rng_seed_to_multiple_of(100_000);
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "CC"]);
@@ -270,7 +270,7 @@ fn test_git_push_undo_colocated() {
     // same result in a seemingly different way?
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main (conflicted):
-      - qpvuntsm 0cffb614 (empty) AA
+      - qpvuntsm hidden 0cffb614 (empty) AA
       + qpvuntsm 0a3e99f0 (empty) CC
       + qpvuntsm 8c05de15 (empty) BB
       @git (behind by 1 commits): qpvuntsm 0a3e99f0 (empty) CC
@@ -302,7 +302,7 @@ fn test_git_push_undo_repo_only() {
     test_env.jj_cmd_ok(&repo_path, &["describe", "-m", "BB"]);
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 8c05de15 (empty) BB
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 0cffb614 (empty) AA
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 0cffb614 (empty) AA
     "###);
     let pre_push_opid = test_env.current_operation_id(&repo_path);
     test_env.jj_cmd_ok(&repo_path, &["git", "push"]);
@@ -322,7 +322,72 @@ fn test_git_push_undo_repo_only() {
     // This currently gives an identical result to `test_git_push_undo_import`.
     insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
     main: qpvuntsm 0a3e99f0 (empty) CC
-      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm 8c05de15 (empty) BB
+      @origin (ahead by 1 commits, behind by 1 commits): qpvuntsm hidden 8c05de15 (empty) BB
+    "###);
+}
+
+#[test]
+fn test_branch_track_untrack_undo() {
+    let test_env = TestEnvironment::default();
+    test_env.add_config(r#"revset-aliases."immutable_heads()" = "none()""#);
+    let git_repo_path = test_env.env_root().join("git-repo");
+    git2::Repository::init_bare(git_repo_path).unwrap();
+    test_env.jj_cmd_ok(test_env.env_root(), &["git", "clone", "git-repo", "repo"]);
+    let repo_path = test_env.env_root().join("repo");
+
+    test_env.jj_cmd_ok(&repo_path, &["describe", "-mcommit"]);
+    test_env.jj_cmd_ok(&repo_path, &["branch", "create", "feature1", "feature2"]);
+    test_env.jj_cmd_ok(&repo_path, &["git", "push"]);
+    test_env.jj_cmd_ok(&repo_path, &["branch", "delete", "feature2"]);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: qpvuntsm 270721f5 (empty) commit
+      @origin: qpvuntsm 270721f5 (empty) commit
+    feature2 (deleted)
+      @origin: qpvuntsm 270721f5 (empty) commit
+      (this branch will be *deleted permanently* on the remote on the
+       next `jj git push`. Use `jj branch forget` to prevent this)
+    "###);
+
+    // Track/untrack can be undone so long as states can be trivially merged.
+    test_env.jj_cmd_ok(
+        &repo_path,
+        &["branch", "untrack", "feature1@origin", "feature2@origin"],
+    );
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: qpvuntsm 270721f5 (empty) commit
+    feature1@origin: qpvuntsm 270721f5 (empty) commit
+    feature2@origin: qpvuntsm 270721f5 (empty) commit
+    "###);
+
+    test_env.jj_cmd_ok(&repo_path, &["undo"]);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: qpvuntsm 270721f5 (empty) commit
+      @origin: qpvuntsm 270721f5 (empty) commit
+    feature2 (deleted)
+      @origin: qpvuntsm 270721f5 (empty) commit
+      (this branch will be *deleted permanently* on the remote on the
+       next `jj git push`. Use `jj branch forget` to prevent this)
+    "###);
+
+    test_env.jj_cmd_ok(&repo_path, &["undo"]);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: qpvuntsm 270721f5 (empty) commit
+    feature1@origin: qpvuntsm 270721f5 (empty) commit
+    feature2@origin: qpvuntsm 270721f5 (empty) commit
+    "###);
+
+    test_env.jj_cmd_ok(&repo_path, &["branch", "track", "feature1@origin"]);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: qpvuntsm 270721f5 (empty) commit
+      @origin: qpvuntsm 270721f5 (empty) commit
+    feature2@origin: qpvuntsm 270721f5 (empty) commit
+    "###);
+
+    test_env.jj_cmd_ok(&repo_path, &["undo"]);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: qpvuntsm 270721f5 (empty) commit
+    feature1@origin: qpvuntsm 270721f5 (empty) commit
+    feature2@origin: qpvuntsm 270721f5 (empty) commit
     "###);
 }
 

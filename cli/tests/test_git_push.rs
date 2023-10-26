@@ -76,7 +76,7 @@ fn test_git_push_current_branch() {
     let stdout = test_env.jj_cmd_success(&workspace_root, &["branch", "list", "--all"]);
     insta::assert_snapshot!(stdout, @r###"
     branch1: lzmmnrxq 19e00bf6 (empty) modified branch1 commit
-      @origin (ahead by 1 commits, behind by 1 commits): lzmmnrxq 45a3aa29 (empty) description 1
+      @origin (ahead by 1 commits, behind by 1 commits): lzmmnrxq hidden 45a3aa29 (empty) description 1
     branch2: yostqsxw 10ee3363 (empty) foo
       @origin (behind by 1 commits): rlzusymt 8476341e (empty) description 2
     my-branch: yostqsxw 10ee3363 (empty) foo
@@ -100,7 +100,7 @@ fn test_git_push_current_branch() {
     let stdout = test_env.jj_cmd_success(&workspace_root, &["branch", "list", "--all"]);
     insta::assert_snapshot!(stdout, @r###"
     branch1: lzmmnrxq 19e00bf6 (empty) modified branch1 commit
-      @origin (ahead by 1 commits, behind by 1 commits): lzmmnrxq 45a3aa29 (empty) description 1
+      @origin (ahead by 1 commits, behind by 1 commits): lzmmnrxq hidden 45a3aa29 (empty) description 1
     branch2: yostqsxw 10ee3363 (empty) foo
       @origin: yostqsxw 10ee3363 (empty) foo
     my-branch: yostqsxw 10ee3363 (empty) foo
@@ -256,7 +256,7 @@ fn test_git_push_locally_created_and_rewritten() {
     branch2: rlzusymt 8476341e (empty) description 2
       @origin: rlzusymt 8476341e (empty) description 2
     my: vruxwmqv bde1d2e4 (empty) local 2
-      @origin (ahead by 1 commits, behind by 1 commits): vruxwmqv fcc99992 (empty) local 1
+      @origin (ahead by 1 commits, behind by 1 commits): vruxwmqv hidden fcc99992 (empty) local 1
     "###);
     let (_stdout, stderr) = test_env.jj_cmd_ok(&workspace_root, &["git", "push"]);
     insta::assert_snapshot!(stderr, @r###"
@@ -318,7 +318,7 @@ fn test_git_push_multiple() {
             "-b=branch1",
             "-b=my-branch",
             "-b=branch1",
-            "-b=my-branch",
+            "-b=glob:my-*",
             "--dry-run",
         ],
     );
@@ -329,6 +329,32 @@ fn test_git_push_multiple() {
       Add branch my-branch to 15dcdaa4f12f
     Dry-run requested, not pushing.
     "###);
+    // Dry run with glob pattern
+    let (stdout, stderr) = test_env.jj_cmd_ok(
+        &workspace_root,
+        &["git", "push", "-b=glob:branch?", "--dry-run"],
+    );
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r###"
+    Branch changes to push to origin:
+      Delete branch branch1 from 45a3aa29e907
+      Force branch branch2 from 8476341eb395 to 15dcdaa4f12f
+    Dry-run requested, not pushing.
+    "###);
+
+    // Unmatched branch name is error
+    let stderr = test_env.jj_cmd_failure(&workspace_root, &["git", "push", "-b=foo"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Error: No such branch: foo
+    "###);
+    let stderr = test_env.jj_cmd_failure(
+        &workspace_root,
+        &["git", "push", "-b=foo", "-b=glob:?branch"],
+    );
+    insta::assert_snapshot!(stderr, @r###"
+    Error: No matching branches for patterns: foo, ?branch
+    "###);
+
     let (stdout, stderr) = test_env.jj_cmd_ok(&workspace_root, &["git", "push", "--all"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
@@ -740,7 +766,7 @@ fn test_git_push_deleted_untracked() {
     "###);
     let stderr = test_env.jj_cmd_failure(&workspace_root, &["git", "push", "--branch=branch1"]);
     insta::assert_snapshot!(stderr, @r###"
-    Error: Branch branch1 doesn't exist
+    Error: No such branch: branch1
     "###);
 }
 

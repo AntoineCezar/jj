@@ -47,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Pushing deleted/moved branches no longer abandons the local commits referenced
   by the remote branches.
 
+* `jj git fetch --branch` now requires `glob:` prefix to expand `*` in branch
+  name.
+
 ### New features
 
 * `jj workspace add` now takes a `--revision` argument.
@@ -56,11 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * `branches()`/`remote_branches()`/`author()`/`committer()`/`description()`
   revsets now support glob matching.
 
+* `jj branch delete`/`forget`, and `jj git push --branch` now support [string
+  pattern syntax](docs/revsets.md#string-patterns). The `--glob` option is
+  deprecated in favor of `glob:` pattern.
+
 ### Fixed bugs
 
 * Updating the working copy to a commit where a file that's currently ignored
   in the working copy no longer leads to a crash
   ([#976](https://github.com/martinvonz/jj/issues/976)).
+
+* Conflicts in executable files can now be resolved just like conflicts in
+  non-executable files ([#1279](https://github.com/martinvonz/jj/issues/1279)).
 
 ## [0.10.0] - 2023-10-04
 

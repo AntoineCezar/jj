@@ -22,11 +22,12 @@ use std::{iter, vec};
 
 use futures::executor::block_on;
 use futures::stream::StreamExt;
+use futures::TryStreamExt;
 use itertools::Itertools;
 
 use crate::backend::{BackendError, BackendResult, ConflictId, MergedTreeId, TreeId, TreeValue};
 use crate::matchers::{EverythingMatcher, Matcher};
-use crate::merge::{Merge, MergeBuilder};
+use crate::merge::{Merge, MergeBuilder, MergedTreeValue};
 use crate::repo_path::{RepoPath, RepoPathComponent, RepoPathJoin};
 use crate::store::Store;
 use crate::tree::{try_resolve_file_conflict, Tree, TreeMergeError};
@@ -45,19 +46,19 @@ pub enum MergedTree {
 
 /// The value at a given path in a `MergedTree`.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub enum MergedTreeValue<'a> {
+pub enum MergedTreeVal<'a> {
     /// A single non-conflicted value.
     Resolved(Option<&'a TreeValue>),
     /// TODO: Make this a `Merge<Option<&'a TreeValue>>` (reference to the
     /// value) once we have removed the `MergedTree::Legacy` variant.
-    Conflict(Merge<Option<TreeValue>>),
+    Conflict(MergedTreeValue),
 }
 
-impl MergedTreeValue<'_> {
-    fn to_merge(&self) -> Merge<Option<TreeValue>> {
+impl MergedTreeVal<'_> {
+    fn to_merge(&self) -> MergedTreeValue {
         match self {
-            MergedTreeValue::Resolved(value) => Merge::resolved(value.cloned()),
-            MergedTreeValue::Conflict(merge) => merge.clone(),
+            MergedTreeVal::Resolved(value) => Merge::resolved(value.cloned()),
+            MergedTreeVal::Conflict(merge) => merge.clone(),
         }
     }
 }
@@ -110,7 +111,7 @@ impl MergedTree {
         // build `2*num_removes + 1` trees
         let mut max_num_removes = 0;
         let store = tree.store();
-        let mut conflicts: Vec<(&RepoPath, Merge<Option<TreeValue>>)> = vec![];
+        let mut conflicts: Vec<(&RepoPath, MergedTreeValue)> = vec![];
         for (path, conflict_id) in &conflict_ids {
             let conflict = store.read_conflict(path, conflict_id)?;
             max_num_removes = max(max_num_removes, conflict.removes().len());
@@ -178,26 +179,26 @@ impl MergedTree {
     /// `self` is a `Merge`, which happens if the value at the path can be
     /// trivially merged. Does not recurse, so if `basename` refers to a Tree,
     /// then a `TreeValue::Tree` will be returned.
-    pub fn value(&self, basename: &RepoPathComponent) -> MergedTreeValue {
+    pub fn value(&self, basename: &RepoPathComponent) -> MergedTreeVal {
         match self {
             MergedTree::Legacy(tree) => match tree.value(basename) {
                 Some(TreeValue::Conflict(conflict_id)) => {
                     let path = tree.dir().join(basename);
                     let conflict = tree.store().read_conflict(&path, conflict_id).unwrap();
-                    MergedTreeValue::Conflict(conflict)
+                    MergedTreeVal::Conflict(conflict)
                 }
-                other => MergedTreeValue::Resolved(other),
+                other => MergedTreeVal::Resolved(other),
             },
             MergedTree::Merge(trees) => {
                 if let Some(tree) = trees.as_resolved() {
-                    return MergedTreeValue::Resolved(tree.value(basename));
+                    return MergedTreeVal::Resolved(tree.value(basename));
                 }
                 let value = trees.map(|tree| tree.value(basename));
                 if let Some(resolved) = value.resolve_trivial() {
-                    return MergedTreeValue::Resolved(*resolved);
+                    return MergedTreeVal::Resolved(*resolved);
                 }
 
-                MergedTreeValue::Conflict(value.map(|x| x.cloned()))
+                MergedTreeVal::Conflict(value.map(|x| x.cloned()))
             }
         }
     }
@@ -218,7 +219,7 @@ impl MergedTree {
     /// all sides are trees, so tree/file conflicts will be reported as a single
     /// conflict, not one for each path in the tree.
     // TODO: Restrict this by a matcher (or add a separate method for that).
-    pub fn conflicts(&self) -> impl Iterator<Item = (RepoPath, Merge<Option<TreeValue>>)> {
+    pub fn conflicts(&self) -> impl Iterator<Item = (RepoPath, MergedTreeValue)> {
         ConflictIterator::new(self.clone())
     }
 
@@ -238,14 +239,14 @@ impl MergedTree {
             tree.sub_tree(name).map(MergedTree::Legacy)
         } else {
             match self.value(name) {
-                MergedTreeValue::Resolved(Some(TreeValue::Tree(sub_tree_id))) => {
+                MergedTreeVal::Resolved(Some(TreeValue::Tree(sub_tree_id))) => {
                     let subdir = self.dir().join(name);
                     Some(MergedTree::resolved(
                         self.store().get_tree(&subdir, sub_tree_id).unwrap(),
                     ))
                 }
-                MergedTreeValue::Resolved(_) => None,
-                MergedTreeValue::Conflict(merge) => {
+                MergedTreeVal::Resolved(_) => None,
+                MergedTreeVal::Conflict(merge) => {
                     let merged_trees = merge.map(|value| match value {
                         Some(TreeValue::Tree(sub_tree_id)) => {
                             let subdir = self.dir().join(name);
@@ -265,7 +266,7 @@ impl MergedTree {
     /// The value at the given path. The value can be `Resolved` even if
     /// `self` is a `Conflict`, which happens if the value at the path can be
     /// trivially merged.
-    pub fn path_value(&self, path: &RepoPath) -> Merge<Option<TreeValue>> {
+    pub fn path_value(&self, path: &RepoPath) -> MergedTreeValue {
         assert_eq!(self.dir(), &RepoPath::root());
         match path.split() {
             Some((dir, basename)) => match self.sub_tree_recursive(dir.components()) {
@@ -337,11 +338,16 @@ impl MergedTree {
 
     /// Collects lists of modified, added, and removed files between this tree
     /// and another tree.
-    pub fn diff_summary(&self, other: &MergedTree, matcher: &dyn Matcher) -> DiffSummary {
+    pub fn diff_summary(
+        &self,
+        other: &MergedTree,
+        matcher: &dyn Matcher,
+    ) -> BackendResult<DiffSummary> {
         let mut modified = vec![];
         let mut added = vec![];
         let mut removed = vec![];
-        for (file, before, after) in self.diff(other, matcher) {
+        for (file, diff) in self.diff(other, matcher) {
+            let (before, after) = diff?;
             if before.is_absent() {
                 added.push(file);
             } else if after.is_absent() {
@@ -353,11 +359,11 @@ impl MergedTree {
         modified.sort();
         added.sort();
         removed.sort();
-        DiffSummary {
+        Ok(DiffSummary {
             modified,
             added,
             removed,
-        }
+        })
     }
 
     /// Merges this tree with `other`, using `base` as base.
@@ -475,8 +481,8 @@ fn merge_trees(merge: &Merge<Tree>) -> Result<Merge<Tree>, TreeMergeError> {
 fn merge_tree_values(
     store: &Arc<Store>,
     path: &RepoPath,
-    values: Merge<Option<TreeValue>>,
-) -> Result<Merge<Option<TreeValue>>, TreeMergeError> {
+    values: MergedTreeValue,
+) -> Result<MergedTreeValue, TreeMergeError> {
     if let Some(resolved) = values.resolve_trivial() {
         return Ok(Merge::resolved(resolved.clone()));
     }
@@ -517,7 +523,7 @@ impl<'a> TreeEntriesNonRecursiveIterator<'a> {
 }
 
 impl<'a> Iterator for TreeEntriesNonRecursiveIterator<'a> {
-    type Item = (&'a RepoPathComponent, MergedTreeValue<'a>);
+    type Item = (&'a RepoPathComponent, MergedTreeVal<'a>);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.basename_iter.next().map(|basename| {
@@ -563,7 +569,7 @@ impl<'matcher> TreeEntriesIterator<'matcher> {
 }
 
 impl Iterator for TreeEntriesIterator<'_> {
-    type Item = (RepoPath, Merge<Option<TreeValue>>);
+    type Item = (RepoPath, MergedTreeValue);
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(top) = self.stack.last_mut() {
@@ -622,13 +628,13 @@ impl<'a> ConflictEntriesNonRecursiveIterator<'a> {
 }
 
 impl<'a> Iterator for ConflictEntriesNonRecursiveIterator<'a> {
-    type Item = (&'a RepoPathComponent, Merge<Option<TreeValue>>);
+    type Item = (&'a RepoPathComponent, MergedTreeValue);
 
     fn next(&mut self) -> Option<Self::Item> {
         for basename in self.basename_iter.by_ref() {
             match self.merged_tree.value(basename) {
-                MergedTreeValue::Resolved(_) => {}
-                MergedTreeValue::Conflict(tree_values) => {
+                MergedTreeVal::Resolved(_) => {}
+                MergedTreeVal::Conflict(tree_values) => {
                     return Some((basename, tree_values));
                 }
             }
@@ -684,7 +690,7 @@ impl ConflictIterator {
 }
 
 impl Iterator for ConflictIterator {
-    type Item = (RepoPath, Merge<Option<TreeValue>>);
+    type Item = (RepoPath, MergedTreeValue);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -765,11 +771,7 @@ impl<'a> TreeEntryDiffIterator<'a> {
 }
 
 impl<'a> Iterator for TreeEntryDiffIterator<'a> {
-    type Item = (
-        &'a RepoPathComponent,
-        MergedTreeValue<'a>,
-        MergedTreeValue<'a>,
-    );
+    type Item = (&'a RepoPathComponent, MergedTreeVal<'a>, MergedTreeVal<'a>);
 
     fn next(&mut self) -> Option<Self::Item> {
         for basename in self.basename_iter.by_ref() {
@@ -803,7 +805,7 @@ enum TreeDiffItem {
     // This is used for making sure that when a directory gets replaced by a file, we
     // yield the value for the addition of the file after we yield the values
     // for removing files in the directory.
-    File(RepoPath, Merge<Option<TreeValue>>, Merge<Option<TreeValue>>),
+    File(RepoPath, MergedTreeValue, MergedTreeValue),
 }
 
 impl<'matcher> TreeDiffIterator<'matcher> {
@@ -818,10 +820,14 @@ impl<'matcher> TreeDiffIterator<'matcher> {
         Self { stack, matcher }
     }
 
-    async fn single_tree(store: &Arc<Store>, dir: &RepoPath, value: Option<&TreeValue>) -> Tree {
+    async fn single_tree(
+        store: &Arc<Store>,
+        dir: &RepoPath,
+        value: Option<&TreeValue>,
+    ) -> BackendResult<Tree> {
         match value {
-            Some(TreeValue::Tree(tree_id)) => store.get_tree_async(dir, tree_id).await.unwrap(),
-            _ => Tree::null(store.clone(), dir.clone()),
+            Some(TreeValue::Tree(tree_id)) => store.get_tree_async(dir, tree_id).await,
+            _ => Ok(Tree::null(store.clone(), dir.clone())),
         }
     }
 
@@ -829,13 +835,13 @@ impl<'matcher> TreeDiffIterator<'matcher> {
     async fn tree(
         tree: &MergedTree,
         dir: &RepoPath,
-        values: &Merge<Option<TreeValue>>,
-    ) -> MergedTree {
+        values: &MergedTreeValue,
+    ) -> BackendResult<MergedTree> {
         let trees = if values.is_tree() {
             let builder: MergeBuilder<Tree> = futures::stream::iter(values.iter())
                 .then(|value| Self::single_tree(tree.store(), dir, value.as_ref()))
-                .collect()
-                .await;
+                .try_collect()
+                .await?;
             builder.build()
         } else {
             Merge::resolved(Tree::null(tree.store().clone(), dir.clone()))
@@ -843,8 +849,8 @@ impl<'matcher> TreeDiffIterator<'matcher> {
         // Maintain the type of tree, so we resolve `TreeValue::Conflict` as necessary
         // in the subtree
         match tree {
-            MergedTree::Legacy(_) => MergedTree::Legacy(trees.into_resolved().unwrap()),
-            MergedTree::Merge(_) => MergedTree::Merge(trees),
+            MergedTree::Legacy(_) => Ok(MergedTree::Legacy(trees.into_resolved().unwrap())),
+            MergedTree::Merge(_) => Ok(MergedTree::Merge(trees)),
         }
     }
 }
@@ -865,7 +871,7 @@ impl TreeDiffDirItem {
 }
 
 impl Iterator for TreeDiffIterator<'_> {
-    type Item = (RepoPath, Merge<Option<TreeValue>>, Merge<Option<TreeValue>>);
+    type Item = (RepoPath, BackendResult<(MergedTreeValue, MergedTreeValue)>);
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(top) = self.stack.last_mut() {
@@ -880,7 +886,7 @@ impl Iterator for TreeDiffIterator<'_> {
                 }
                 TreeDiffItem::File(..) => {
                     if let TreeDiffItem::File(name, before, after) = self.stack.pop().unwrap() {
-                        return Some((name, before, after));
+                        return Some((name, Ok((before, after))));
                     } else {
                         unreachable!();
                     }
@@ -897,6 +903,18 @@ impl Iterator for TreeDiffIterator<'_> {
                         let after_tree = Self::tree(dir.tree2.as_ref(), &path, &after);
                         futures::join!(before_tree, after_tree)
                     });
+                    let before_tree = match before_tree {
+                        Ok(tree) => tree,
+                        Err(err) => {
+                            return Some((path, Err(err)));
+                        }
+                    };
+                    let after_tree = match after_tree {
+                        Ok(tree) => tree,
+                        Err(err) => {
+                            return Some((path, Err(err)));
+                        }
+                    };
                     let subdir = TreeDiffDirItem::new(path.clone(), before_tree, after_tree);
                     self.stack.push(TreeDiffItem::Dir(subdir));
                     self.stack.len() - 1
@@ -906,7 +924,7 @@ impl Iterator for TreeDiffIterator<'_> {
             if self.matcher.matches(&path) {
                 if !tree_before && tree_after {
                     if before.is_present() {
-                        return Some((path, before, Merge::absent()));
+                        return Some((path, Ok((before, Merge::absent()))));
                     }
                 } else if tree_before && !tree_after {
                     if after.is_present() {
@@ -916,7 +934,7 @@ impl Iterator for TreeDiffIterator<'_> {
                         );
                     }
                 } else if !tree_before && !tree_after {
-                    return Some((path, before, after));
+                    return Some((path, Ok((before, after))));
                 }
             }
         }
@@ -930,7 +948,7 @@ impl Iterator for TreeDiffIterator<'_> {
 /// (allowing path-level conflicts) or as multiple conflict-free trees.
 pub struct MergedTreeBuilder {
     base_tree_id: MergedTreeId,
-    overrides: BTreeMap<RepoPath, Merge<Option<TreeValue>>>,
+    overrides: BTreeMap<RepoPath, MergedTreeValue>,
 }
 
 impl MergedTreeBuilder {
@@ -948,7 +966,7 @@ impl MergedTreeBuilder {
     /// `Merge::absent()` to remove a value from the tree. When the base tree is
     /// a legacy tree, conflicts can be written either as a multi-way `Merge`
     /// value or as a resolved `Merge` value using `TreeValue::Conflict`.
-    pub fn set_or_remove(&mut self, path: RepoPath, values: Merge<Option<TreeValue>>) {
+    pub fn set_or_remove(&mut self, path: RepoPath, values: MergedTreeValue) {
         if let MergedTreeId::Merge(_) = &self.base_tree_id {
             assert!(!values
                 .iter()

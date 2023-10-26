@@ -38,7 +38,7 @@ use jj_lib::commit::Commit;
 use jj_lib::dag_walk::topo_order_reverse;
 use jj_lib::git_backend::GitBackend;
 use jj_lib::matchers::EverythingMatcher;
-use jj_lib::merge::Merge;
+use jj_lib::merge::{Merge, MergedTreeValue};
 use jj_lib::merged_tree::{MergedTree, MergedTreeBuilder};
 use jj_lib::op_store::WorkspaceId;
 use jj_lib::repo::{ReadonlyRepo, Repo};
@@ -3215,7 +3215,7 @@ fn cmd_resolve(
 
 #[instrument(skip_all)]
 fn print_conflicted_paths(
-    conflicts: &[(RepoPath, Merge<Option<TreeValue>>)],
+    conflicts: &[(RepoPath, MergedTreeValue)],
     formatter: &mut dyn Formatter,
     workspace_command: &WorkspaceCommandHelper,
 ) -> Result<(), CommandError> {
@@ -3337,7 +3337,8 @@ fn cmd_restore(
         let matcher = workspace_command.matcher_from_values(&args.paths)?;
         let mut tree_builder = MergedTreeBuilder::new(to_commit.tree_id().clone());
         let to_tree = to_commit.tree()?;
-        for (repo_path, before, _after) in from_tree.diff(&to_tree, matcher.as_ref()) {
+        for (repo_path, diff) in from_tree.diff(&to_tree, matcher.as_ref()) {
+            let (before, _after) = diff?;
             tree_builder.set_or_remove(repo_path, before);
         }
         tree_builder.write_tree(workspace_command.repo().store())?

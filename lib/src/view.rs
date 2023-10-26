@@ -15,36 +15,14 @@
 #![allow(missing_docs)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt;
 
-use itertools::{EitherOrBoth, Itertools};
+use itertools::Itertools;
 
 use crate::backend::CommitId;
-use crate::index::Index;
-use crate::op_store;
-use crate::op_store::{
-    BranchTarget, RefTarget, RefTargetOptionExt as _, RemoteRef, RemoteRefState, WorkspaceId,
-};
-use crate::refs::{merge_ref_targets, TrackingRefPair};
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug)]
-pub enum RefName {
-    LocalBranch(String),
-    RemoteBranch { branch: String, remote: String },
-    Tag(String),
-    GitRef(String),
-}
-
-impl fmt::Display for RefName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RefName::LocalBranch(name) => write!(f, "{name}"),
-            RefName::RemoteBranch { branch, remote } => write!(f, "{branch}@{remote}"),
-            RefName::Tag(name) => write!(f, "{name}"),
-            RefName::GitRef(name) => write!(f, "{name}"),
-        }
-    }
-}
+use crate::op_store::{BranchTarget, RefTarget, RefTargetOptionExt as _, RemoteRef, WorkspaceId};
+use crate::refs::TrackingRefPair;
+use crate::str_util::StringPattern;
+use crate::{op_store, refs};
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct View {
@@ -129,30 +107,6 @@ impl View {
         self.data.public_head_ids.remove(head_id);
     }
 
-    pub fn get_ref(&self, name: &RefName) -> &RefTarget {
-        match &name {
-            RefName::LocalBranch(name) => self.get_local_branch(name),
-            RefName::RemoteBranch { branch, remote } => {
-                &self.get_remote_branch(branch, remote).target
-            }
-            RefName::Tag(name) => self.get_tag(name),
-            RefName::GitRef(name) => self.get_git_ref(name),
-        }
-    }
-
-    /// Sets reference of the specified kind to point to the given target. If
-    /// the target is absent, the reference will be removed.
-    pub fn set_ref_target(&mut self, name: &RefName, target: RefTarget) {
-        match name {
-            RefName::LocalBranch(name) => self.set_local_branch_target(name, target),
-            RefName::RemoteBranch { branch, remote } => {
-                self.set_remote_branch_target(branch, remote, target)
-            }
-            RefName::Tag(name) => self.set_tag_target(name, target),
-            RefName::GitRef(name) => self.set_git_ref_target(name, target),
-        }
-    }
-
     /// Returns true if any local or remote branch of the given `name` exists.
     #[must_use]
     pub fn has_branch(&self, name: &str) -> bool {
@@ -177,6 +131,17 @@ impl View {
         self.data
             .local_branches
             .iter()
+            .map(|(name, target)| (name.as_ref(), target))
+    }
+
+    /// Iterates local branch `(name, target)`s matching the given pattern.
+    /// Entries are sorted by `name`.
+    pub fn local_branches_matching<'a: 'b, 'b>(
+        &'a self,
+        pattern: &'b StringPattern,
+    ) -> impl Iterator<Item = (&'a str, &'a RefTarget)> + 'b {
+        pattern
+            .filter_btree_map(&self.data.local_branches)
             .map(|(name, target)| (name.as_ref(), target))
     }
 
@@ -215,6 +180,27 @@ impl View {
             .flatten()
     }
 
+    /// Iterates remote branch `((name, remote_name), remote_ref)`s matching the
+    /// given patterns. Entries are sorted by `(name, remote_name)`.
+    pub fn remote_branches_matching<'a: 'b, 'b>(
+        &'a self,
+        branch_pattern: &'b StringPattern,
+        remote_pattern: &'b StringPattern,
+    ) -> impl Iterator<Item = ((&'a str, &'a str), &'a RemoteRef)> + 'b {
+        // Use kmerge instead of flat_map for consistency with all_remote_branches().
+        remote_pattern
+            .filter_btree_map(&self.data.remote_views)
+            .map(|(remote_name, remote_view)| {
+                branch_pattern.filter_btree_map(&remote_view.branches).map(
+                    |(branch_name, remote_ref)| {
+                        let full_name = (branch_name.as_ref(), remote_name.as_ref());
+                        (full_name, remote_ref)
+                    },
+                )
+            })
+            .kmerge_by(|(full_name1, _), (full_name2, _)| full_name1 < full_name2)
+    }
+
     pub fn get_remote_branch(&self, name: &str, remote_name: &str) -> &RemoteRef {
         if let Some(remote_view) = self.data.remote_views.get(remote_name) {
             remote_view.branches.get(name).flatten()
@@ -238,59 +224,46 @@ impl View {
         }
     }
 
-    /// Sets remote-tracking branch to point to the given target. If the target
-    /// is absent, the branch will be removed.
-    ///
-    /// If the branch already exists, its tracking state won't be changed.
-    fn set_remote_branch_target(&mut self, name: &str, remote_name: &str, target: RefTarget) {
-        if target.is_present() {
-            let remote_view = self
-                .data
-                .remote_views
-                .entry(remote_name.to_owned())
-                .or_default();
-            if let Some(remote_ref) = remote_view.branches.get_mut(name) {
-                remote_ref.target = target;
-            } else {
-                let remote_ref = RemoteRef {
-                    target,
-                    state: RemoteRefState::New,
-                };
-                remote_view.branches.insert(name.to_owned(), remote_ref);
-            }
-        } else if let Some(remote_view) = self.data.remote_views.get_mut(remote_name) {
-            remote_view.branches.remove(name);
-        }
-    }
-
     /// Iterates local/remote branch `(name, remote_ref)`s of the specified
     /// remote in lexicographical order.
     pub fn local_remote_branches<'a>(
         &'a self,
         remote_name: &str,
     ) -> impl Iterator<Item = (&'a str, TrackingRefPair<'a>)> + 'a {
-        itertools::merge_join_by(
-            self.local_branches(),
-            self.remote_branches(remote_name),
-            |(name1, _), (name2, _)| name1.cmp(name2),
+        refs::iter_named_local_remote_refs(self.local_branches(), self.remote_branches(remote_name))
+            .map(|(name, (local_target, remote_ref))| {
+                let targets = TrackingRefPair {
+                    local_target,
+                    remote_ref,
+                };
+                (name, targets)
+            })
+    }
+
+    /// Iterates local/remote branch `(name, remote_ref)`s of the specified
+    /// remote, matching the given branch name pattern. Entries are sorted by
+    /// `name`.
+    pub fn local_remote_branches_matching<'a: 'b, 'b>(
+        &'a self,
+        branch_pattern: &'b StringPattern,
+        remote_name: &str,
+    ) -> impl Iterator<Item = (&'a str, TrackingRefPair<'a>)> + 'b {
+        // Change remote_name to StringPattern if needed, but merge-join adapter won't
+        // be usable.
+        let maybe_remote_view = self.data.remote_views.get(remote_name);
+        refs::iter_named_local_remote_refs(
+            branch_pattern.filter_btree_map(&self.data.local_branches),
+            maybe_remote_view
+                .map(|remote_view| branch_pattern.filter_btree_map(&remote_view.branches))
+                .into_iter()
+                .flatten(),
         )
-        .map(|entry| match entry {
-            EitherOrBoth::Both((name, local_target), (_, remote_ref)) => {
-                (name, (local_target, remote_ref))
-            }
-            EitherOrBoth::Left((name, local_target)) => {
-                (name, (local_target, RemoteRef::absent_ref()))
-            }
-            EitherOrBoth::Right((name, remote_ref)) => {
-                (name, (RefTarget::absent_ref(), remote_ref))
-            }
-        })
         .map(|(name, (local_target, remote_ref))| {
             let targets = TrackingRefPair {
                 local_target,
                 remote_ref,
             };
-            (name, targets)
+            (name.as_ref(), targets)
         })
     }
 
@@ -348,21 +321,5 @@ impl View {
 
     pub fn store_view_mut(&mut self) -> &mut op_store::View {
         &mut self.data
-    }
-
-    pub fn merge_single_ref(
-        &mut self,
-        index: &dyn Index,
-        ref_name: &RefName,
-        base_target: &RefTarget,
-        other_target: &RefTarget,
-    ) {
-        if base_target != other_target {
-            let self_target = self.get_ref(ref_name);
-            let new_target = merge_ref_targets(index, self_target, base_target, other_target);
-            if new_target != *self_target {
-                self.set_ref_target(ref_name, new_target);
-            }
-        }
     }
 }

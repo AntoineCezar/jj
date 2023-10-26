@@ -99,6 +99,13 @@ fn test_branch_forget_glob() {
         test_env.jj_cmd_ok(&repo_path, &["branch", "forget", "--glob", "foo-[1-3]"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
+    --glob has been deprecated. Please prefix the pattern with `glob:` instead.
+    Forgot 2 branches.
+    "###);
+    test_env.jj_cmd_ok(&repo_path, &["undo"]);
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "forget", "glob:foo-[1-3]"]);
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r###"
     Forgot 2 branches.
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
@@ -110,36 +117,33 @@ fn test_branch_forget_glob() {
     // multiple glob patterns, shouldn't produce an error.
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &[
-            "branch", "forget", "foo-4", "--glob", "foo-*", "--glob", "foo-*",
-        ],
+        &["branch", "forget", "foo-4", "--glob", "foo-*", "glob:foo-*"],
     );
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(stderr, @"");
+    insta::assert_snapshot!(stderr, @r###"
+    --glob has been deprecated. Please prefix the pattern with `glob:` instead.
+    "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
     @  bar-2 230dd059e1b0
     ◉   000000000000
     "###);
 
     // Malformed glob
-    let stderr = test_env.jj_cmd_failure(&repo_path, &["branch", "forget", "--glob", "foo-[1-3"]);
+    let stderr = test_env.jj_cmd_cli_error(&repo_path, &["branch", "forget", "glob:foo-[1-3"]);
     insta::assert_snapshot!(stderr, @r###"
-    Error: Failed to compile glob: Pattern syntax error near position 4: invalid range pattern
+    error: invalid value 'glob:foo-[1-3' for '[NAMES]...': Pattern syntax error near position 4: invalid range pattern
+
+    For more information, try '--help'.
     "###);
 
     // We get an error if none of the globs match anything
     let stderr = test_env.jj_cmd_failure(
         &repo_path,
-        &[
-            "branch",
-            "forget",
-            "--glob=bar*",
-            "--glob=baz*",
-            "--glob=boom*",
-        ],
+        &["branch", "forget", "glob:bar*", "glob:baz*", "--glob=boom*"],
     );
     insta::assert_snapshot!(stderr, @r###"
-    Error: The provided globs 'baz*', 'boom*' did not match any branches
+    --glob has been deprecated. Please prefix the pattern with `glob:` instead.
+    Error: No matching branches for patterns: baz*, boom*
     "###);
 }
 
@@ -177,6 +181,13 @@ fn test_branch_delete_glob() {
         test_env.jj_cmd_ok(&repo_path, &["branch", "delete", "--glob", "foo-[1-3]"]);
     insta::assert_snapshot!(stdout, @"");
     insta::assert_snapshot!(stderr, @r###"
+    --glob has been deprecated. Please prefix the pattern with `glob:` instead.
+    Deleted 2 branches.
+    "###);
+    test_env.jj_cmd_ok(&repo_path, &["undo"]);
+    let (stdout, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "delete", "glob:foo-[1-3]"]);
+    insta::assert_snapshot!(stdout, @"");
+    insta::assert_snapshot!(stderr, @r###"
     Deleted 2 branches.
     "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
@@ -188,19 +199,20 @@ fn test_branch_delete_glob() {
     // forget`, it's not allowed to delete already deleted branches.
     let stderr = test_env.jj_cmd_failure(&repo_path, &["branch", "delete", "--glob=foo-[1-3]"]);
     insta::assert_snapshot!(stderr, @r###"
-    Error: The provided glob 'foo-[1-3]' did not match any branches
+    --glob has been deprecated. Please prefix the pattern with `glob:` instead.
+    Error: No matching branches for patterns: foo-[1-3]
     "###);
 
     // Deleting a branch via both explicit name and glob pattern, or with
     // multiple glob patterns, shouldn't produce an error.
     let (stdout, stderr) = test_env.jj_cmd_ok(
         &repo_path,
-        &[
-            "branch", "delete", "foo-4", "--glob", "foo-*", "--glob", "foo-*",
-        ],
+        &["branch", "delete", "foo-4", "--glob", "foo-*", "glob:foo-*"],
     );
     insta::assert_snapshot!(stdout, @"");
-    insta::assert_snapshot!(stderr, @"");
+    insta::assert_snapshot!(stderr, @r###"
+    --glob has been deprecated. Please prefix the pattern with `glob:` instead.
+    "###);
     insta::assert_snapshot!(get_log_output(&test_env, &repo_path), @r###"
     @  bar-2 foo-1@origin foo-3@origin foo-4@origin 6fbf398c2d59
     ◉   000000000000
@@ -225,9 +237,19 @@ fn test_branch_delete_glob() {
     "###);
 
     // Malformed glob
-    let stderr = test_env.jj_cmd_failure(&repo_path, &["branch", "delete", "--glob", "foo-[1-3"]);
+    let stderr = test_env.jj_cmd_cli_error(&repo_path, &["branch", "delete", "glob:foo-[1-3"]);
     insta::assert_snapshot!(stderr, @r###"
-    Error: Failed to compile glob: Pattern syntax error near position 4: invalid range pattern
+    error: invalid value 'glob:foo-[1-3' for '[NAMES]...': Pattern syntax error near position 4: invalid range pattern
+
+    For more information, try '--help'.
+    "###);
+
+    // Unknown pattern kind
+    let stderr = test_env.jj_cmd_cli_error(&repo_path, &["branch", "forget", "whatever:branch"]);
+    insta::assert_snapshot!(stderr, @r###"
+    error: invalid value 'whatever:branch' for '[NAMES]...': Invalid string pattern kind "whatever"
+
+    For more information, try '--help'.
     "###);
 }
 
@@ -641,7 +663,7 @@ fn test_branch_track_untrack() {
 }
 
 #[test]
-fn test_branch_track_untrack_bad_branches() {
+fn test_branch_track_untrack_patterns() {
     let test_env = TestEnvironment::default();
     test_env.jj_cmd_ok(test_env.env_root(), &["init", "repo", "--git"]);
     let repo_path = test_env.env_root().join("repo");
@@ -695,25 +717,78 @@ fn test_branch_track_untrack_bad_branches() {
         test_env.jj_cmd_failure(&repo_path, &["branch", "untrack", "main@origin"]), @r###"
     Error: No such remote branch: main@origin
     "###);
+    insta::assert_snapshot!(
+        test_env.jj_cmd_failure(&repo_path, &["branch", "track", "glob:maine@*"]), @r###"
+    Error: No matching remote branches for patterns: maine@*
+    "###);
+    insta::assert_snapshot!(
+        test_env.jj_cmd_failure(
+            &repo_path,
+            &["branch", "untrack", "main@origin", "glob:main@o*"],
+        ), @r###"
+    Error: No matching remote branches for patterns: main@origin, main@o*
+    "###);
 
     // Track already tracked branch
     test_env.jj_cmd_ok(&repo_path, &["branch", "track", "feature1@origin"]);
-    insta::assert_snapshot!(
-        test_env.jj_cmd_failure(&repo_path, &["branch", "track", "feature1@origin"]), @r###"
-    Error: Remote branch already tracked: feature1@origin
+    let (_, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "track", "feature1@origin"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Remote branch already tracked: feature1@origin
+    Nothing changed.
     "###);
 
     // Untrack non-tracking branch
-    insta::assert_snapshot!(
-        test_env.jj_cmd_failure(&repo_path, &["branch", "untrack", "feature2@origin"]), @r###"
-    Error: Remote branch not tracked yet: feature2@origin
+    let (_, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "untrack", "feature2@origin"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Remote branch not tracked yet: feature2@origin
+    Nothing changed.
     "###);
 
     // Untrack Git-tracking branch
     test_env.jj_cmd_ok(&repo_path, &["git", "export"]);
-    insta::assert_snapshot!(
-        test_env.jj_cmd_failure(&repo_path, &["branch", "untrack", "main@git"]), @r###"
-    Error: Git-tracking branch cannot be untracked
+    let (_, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "untrack", "main@git"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Git-tracking branch cannot be untracked: main@git
+    Nothing changed.
+    "###);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: omvolwpu 1336caed commit
+      @git: omvolwpu 1336caed commit
+      @origin: omvolwpu 1336caed commit
+    feature2@origin: omvolwpu 1336caed commit
+    main: qpvuntsm 230dd059 (empty) (no description set)
+      @git: qpvuntsm 230dd059 (empty) (no description set)
+    "###);
+
+    // Untrack by pattern
+    let (_, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "untrack", "glob:*@*"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Git-tracking branch cannot be untracked: feature1@git
+    Remote branch not tracked yet: feature2@origin
+    Git-tracking branch cannot be untracked: main@git
+    "###);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: omvolwpu 1336caed commit
+      @git: omvolwpu 1336caed commit
+    feature1@origin: omvolwpu 1336caed commit
+    feature2@origin: omvolwpu 1336caed commit
+    main: qpvuntsm 230dd059 (empty) (no description set)
+      @git: qpvuntsm 230dd059 (empty) (no description set)
+    "###);
+
+    // Track by pattern
+    let (_, stderr) = test_env.jj_cmd_ok(&repo_path, &["branch", "track", "glob:feature?@origin"]);
+    insta::assert_snapshot!(stderr, @r###"
+    Started tracking 2 remote branches.
+    "###);
+    insta::assert_snapshot!(get_branch_output(&test_env, &repo_path), @r###"
+    feature1: omvolwpu 1336caed commit
+      @git: omvolwpu 1336caed commit
+      @origin: omvolwpu 1336caed commit
+    feature2: omvolwpu 1336caed commit
+      @origin: omvolwpu 1336caed commit
+    main: qpvuntsm 230dd059 (empty) (no description set)
+      @git: qpvuntsm 230dd059 (empty) (no description set)
     "###);
 }
 
@@ -843,7 +918,7 @@ fn test_branch_list_filtered_by_revset() {
        next `jj git push`. Use `jj branch forget` to prevent this)
     remote-keep: nlwprzpn 911e9120 (empty) remote-keep
     remote-rewrite: xyxluytn e31634b6 (empty) rewritten
-      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn 3e9a5af6 (empty) remote-rewrite
+      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
     "###);
 
     let query = |revset| test_env.jj_cmd_success(&local_path, &["branch", "list", "-r", revset]);
@@ -856,7 +931,7 @@ fn test_branch_list_filtered_by_revset() {
     local-keep: kpqxywon c7b4c09c (empty) local-keep
     remote-keep: nlwprzpn 911e9120 (empty) remote-keep
     remote-rewrite: xyxluytn e31634b6 (empty) rewritten
-      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn 3e9a5af6 (empty) remote-rewrite
+      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
     "###);
 
     // Exclude remote-only branches. "remote-rewrite@origin" is included since
@@ -865,13 +940,13 @@ fn test_branch_list_filtered_by_revset() {
     local-keep: kpqxywon c7b4c09c (empty) local-keep
     remote-keep: nlwprzpn 911e9120 (empty) remote-keep
     remote-rewrite: xyxluytn e31634b6 (empty) rewritten
-      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn 3e9a5af6 (empty) remote-rewrite
+      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
     "###);
 
     // Select branches by name.
     insta::assert_snapshot!(query("branches(remote-rewrite)"), @r###"
     remote-rewrite: xyxluytn e31634b6 (empty) rewritten
-      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn 3e9a5af6 (empty) remote-rewrite
+      @origin (ahead by 1 commits, behind by 1 commits): xyxluytn hidden 3e9a5af6 (empty) remote-rewrite
     "###);
 
     // Can't select deleted branch.

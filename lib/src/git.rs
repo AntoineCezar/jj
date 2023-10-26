@@ -17,8 +17,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::default::Default;
 use std::io::Read;
-use std::iter;
 use std::path::PathBuf;
+use std::{fmt, iter};
 
 use git2::Oid;
 use itertools::Itertools;
@@ -33,12 +33,30 @@ use crate::refs::BranchPushUpdate;
 use crate::repo::{MutableRepo, Repo};
 use crate::revset::{self, RevsetExpression};
 use crate::settings::GitSettings;
-use crate::view::{RefName, View};
+use crate::str_util::StringPattern;
+use crate::view::View;
 
 /// Reserved remote name for the backing Git repo.
 pub const REMOTE_NAME_FOR_LOCAL_GIT_REPO: &str = "git";
 /// Ref name used as a placeholder to unset HEAD without a commit.
 const UNBORN_ROOT_REF_NAME: &str = "refs/jj/root";
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug)]
+pub enum RefName {
+    LocalBranch(String),
+    RemoteBranch { branch: String, remote: String },
+    Tag(String),
+}
+
+impl fmt::Display for RefName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RefName::LocalBranch(name) => write!(f, "{name}"),
+            RefName::RemoteBranch { branch, remote } => write!(f, "{branch}@{remote}"),
+            RefName::Tag(name) => write!(f, "{name}"),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum GitImportError {
@@ -98,14 +116,13 @@ fn to_git_ref_name(parsed_ref: &RefName) -> Option<String> {
         RefName::RemoteBranch { branch, remote } => (!branch.is_empty() && branch != "HEAD")
             .then(|| format!("refs/remotes/{remote}/{branch}")),
         RefName::Tag(tag) => Some(format!("refs/tags/{tag}")),
-        RefName::GitRef(name) => Some(name.to_owned()),
     }
 }
 
 fn to_remote_branch<'a>(parsed_ref: &'a RefName, remote_name: &str) -> Option<&'a str> {
     match parsed_ref {
         RefName::RemoteBranch { branch, remote } => (remote == remote_name).then_some(branch),
-        RefName::LocalBranch(..) | RefName::Tag(..) | RefName::GitRef(..) => None,
+        RefName::LocalBranch(..) | RefName::Tag(..) => None,
     }
 }
 
@@ -271,21 +288,27 @@ pub fn import_some_refs(
                 default_remote_ref_state_for(ref_name, git_settings)
             },
         };
-        if let RefName::RemoteBranch { branch, remote } = ref_name {
-            if new_remote_ref.is_tracking() {
-                let local_ref_name = RefName::LocalBranch(branch.clone());
-                mut_repo.merge_single_ref(&local_ref_name, base_target, &new_remote_ref.target);
-            }
-            // Remote-tracking branch is the last known state of the branch in the remote.
-            // It shouldn't diverge even if we had inconsistent view.
-            mut_repo.set_remote_branch(branch, remote, new_remote_ref);
-        } else {
-            if new_remote_ref.is_tracking() {
-                mut_repo.merge_single_ref(ref_name, base_target, &new_remote_ref.target);
-            }
-            if let RefName::LocalBranch(branch) = ref_name {
+        match ref_name {
+            RefName::LocalBranch(branch) => {
+                if new_remote_ref.is_tracking() {
+                    mut_repo.merge_local_branch(branch, base_target, &new_remote_ref.target);
+                }
                 // Update Git-tracking branch like the other remote branches.
                 mut_repo.set_remote_branch(branch, REMOTE_NAME_FOR_LOCAL_GIT_REPO, new_remote_ref);
+            }
+            RefName::RemoteBranch { branch, remote } => {
+                if new_remote_ref.is_tracking() {
+                    mut_repo.merge_local_branch(branch, base_target, &new_remote_ref.target);
+                }
+                // Remote-tracking branch is the last known state of the branch in the remote.
+                // It shouldn't diverge even if we had inconsistent view.
+                mut_repo.set_remote_branch(branch, remote, new_remote_ref);
+            }
+            RefName::Tag(name) => {
+                if new_remote_ref.is_tracking() {
+                    mut_repo.merge_tag(name, base_target, &new_remote_ref.target);
+                }
+                // TODO: If we add Git-tracking tag, it will be updated here.
             }
         }
     }
@@ -443,7 +466,6 @@ fn default_remote_ref_state_for(ref_name: &RefName, git_settings: &GitSettings) 
                 RemoteRefState::New
             }
         }
-        RefName::GitRef(_) => unreachable!(),
     }
 }
 
@@ -947,12 +969,17 @@ fn rename_remote_refs(mut_repo: &mut MutableRepo, old_remote_name: &str, new_rem
     }
 }
 
+const INVALID_REFSPEC_CHARS: [char; 5] = [':', '^', '?', '[', ']'];
+
 #[derive(Error, Debug)]
 pub enum GitFetchError {
     #[error("No git remote named '{0}'")]
     NoSuchRemote(String),
-    #[error("Invalid glob provided. Globs may not contain the characters `:` or `^`.")]
-    InvalidGlob,
+    #[error(
+        "Invalid branch pattern provided. Patterns may not contain the characters `{chars}`",
+        chars = INVALID_REFSPEC_CHARS.iter().join("`, `")
+    )]
+    InvalidBranchPattern,
     #[error("Failed to import Git refs: {0}")]
     GitImportError(#[from] GitImportError),
     // TODO: I'm sure there are other errors possible, such as transport-level errors.
@@ -974,26 +1001,10 @@ pub fn fetch(
     mut_repo: &mut MutableRepo,
     git_repo: &git2::Repository,
     remote_name: &str,
-    branch_name_globs: Option<&[&str]>,
+    branch_names: &[StringPattern],
     callbacks: RemoteCallbacks<'_>,
     git_settings: &GitSettings,
 ) -> Result<GitFetchStats, GitFetchError> {
-    let branch_name_filter = {
-        let regex = if let Some(globs) = branch_name_globs {
-            let result = regex::RegexSet::new(
-                globs
-                    .iter()
-                    .map(|glob| format!("^{}$", glob.replace('*', ".*"))),
-            )
-            .map_err(|_| GitFetchError::InvalidGlob)?;
-            tracing::debug!(?globs, ?result, "globs as regex");
-            Some(result)
-        } else {
-            None
-        };
-        move |branch: &str| regex.as_ref().map(|r| r.is_match(branch)).unwrap_or(true)
-    };
-
     // Perform a `git fetch` on the local git repo, updating the remote-tracking
     // branches in the git repo.
     let mut remote = git_repo.find_remote(remote_name).map_err(|err| {
@@ -1009,19 +1020,28 @@ pub fn fetch(
     fetch_options.proxy_options(proxy_options);
     let callbacks = callbacks.into_git();
     fetch_options.remote_callbacks(callbacks);
-    let refspecs = {
-        // If no globs have been given, import all branches
-        let globs = branch_name_globs.unwrap_or(&["*"]);
-        if globs.iter().any(|g| g.contains(|c| ":^".contains(c))) {
-            return Err(GitFetchError::InvalidGlob);
-        }
-        // At this point, we are only updating Git's remote tracking branches, not the
-        // local branches.
-        globs
-            .iter()
-            .map(|glob| format!("+refs/heads/{glob}:refs/remotes/{remote_name}/{glob}"))
-            .collect_vec()
-    };
+    // At this point, we are only updating Git's remote tracking branches, not the
+    // local branches.
+    let refspecs: Vec<_> = branch_names
+        .iter()
+        .map(|pattern| {
+            pattern
+                .to_glob()
+                .filter(|glob| !glob.contains(INVALID_REFSPEC_CHARS))
+                .map(|glob| format!("+refs/heads/{glob}:refs/remotes/{remote_name}/{glob}"))
+        })
+        .collect::<Option<_>>()
+        .ok_or(GitFetchError::InvalidBranchPattern)?;
+    if refspecs.is_empty() {
+        // Don't fall back to the base refspecs.
+        let stats = GitFetchStats {
+            default_branch: None,
+            import_stats: GitImportStats {
+                abandoned_commits: vec![],
+            },
+        };
+        return Ok(stats);
+    }
     tracing::debug!("remote.download");
     remote.download(&refspecs, Some(&mut fetch_options))?;
     tracing::debug!("remote.prune");
@@ -1050,7 +1070,7 @@ pub fn fetch(
     tracing::debug!("import_refs");
     let import_stats = import_some_refs(mut_repo, git_repo, git_settings, |ref_name| {
         to_remote_branch(ref_name, remote_name)
-            .map(&branch_name_filter)
+            .map(|branch| branch_names.iter().any(|pattern| pattern.matches(branch)))
             .unwrap_or_else(|| matches!(ref_name, RefName::Tag(_)))
     })?;
     let stats = GitFetchStats {

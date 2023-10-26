@@ -28,14 +28,14 @@ use jj_lib::commit_builder::CommitBuilder;
 use jj_lib::git;
 use jj_lib::git::{
     FailedRefExport, FailedRefExportReason, GitBranchPushTargets, GitFetchError, GitImportError,
-    GitPushError, GitRefUpdate, SubmoduleConfig,
+    GitPushError, GitRefUpdate, RefName, SubmoduleConfig,
 };
 use jj_lib::git_backend::GitBackend;
 use jj_lib::op_store::{BranchTarget, RefTarget, RemoteRef, RemoteRefState};
 use jj_lib::refs::BranchPushUpdate;
 use jj_lib::repo::{MutableRepo, ReadonlyRepo, Repo};
 use jj_lib::settings::{GitSettings, UserSettings};
-use jj_lib::view::RefName;
+use jj_lib::str_util::StringPattern;
 use jj_lib::workspace::Workspace;
 use maplit::{btreemap, hashset};
 use tempfile::TempDir;
@@ -1965,7 +1965,7 @@ fn test_fetch_empty_repo() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
@@ -1990,7 +1990,7 @@ fn test_fetch_initial_commit() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
@@ -2039,7 +2039,7 @@ fn test_fetch_success() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
@@ -2064,7 +2064,7 @@ fn test_fetch_success() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
@@ -2120,7 +2120,7 @@ fn test_fetch_prune_deleted_ref() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
@@ -2139,7 +2139,7 @@ fn test_fetch_prune_deleted_ref() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
@@ -2161,7 +2161,7 @@ fn test_fetch_no_default_branch() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
@@ -2184,13 +2184,44 @@ fn test_fetch_no_default_branch() {
         tx.mut_repo(),
         &test_data.git_repo,
         "origin",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     )
     .unwrap();
     // There is no default branch
     assert_eq!(stats.default_branch, None);
+}
+
+#[test]
+fn test_fetch_empty_refspecs() {
+    let test_data = GitRepoData::create();
+    let git_settings = GitSettings::default();
+    empty_git_commit(&test_data.origin_repo, "refs/heads/main", &[]);
+
+    // Base refspecs shouldn't be respected
+    let mut tx = test_data
+        .repo
+        .start_transaction(&test_data.settings, "test");
+    git::fetch(
+        tx.mut_repo(),
+        &test_data.git_repo,
+        "origin",
+        &[],
+        git::RemoteCallbacks::default(),
+        &git_settings,
+    )
+    .unwrap();
+    assert!(tx
+        .mut_repo()
+        .get_remote_branch("main", "origin")
+        .is_absent());
+    // No remote refs should have been fetched
+    git::import_refs(tx.mut_repo(), &test_data.git_repo, &git_settings).unwrap();
+    assert!(tx
+        .mut_repo()
+        .get_remote_branch("main", "origin")
+        .is_absent());
 }
 
 #[test]
@@ -2204,7 +2235,7 @@ fn test_fetch_no_such_remote() {
         tx.mut_repo(),
         &test_data.git_repo,
         "invalid-remote",
-        None,
+        &[StringPattern::everything()],
         git::RemoteCallbacks::default(),
         &git_settings,
     );

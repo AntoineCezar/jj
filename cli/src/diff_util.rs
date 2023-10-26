@@ -25,7 +25,7 @@ use jj_lib::commit::Commit;
 use jj_lib::diff::{Diff, DiffHunk};
 use jj_lib::files::DiffLine;
 use jj_lib::matchers::Matcher;
-use jj_lib::merge::Merge;
+use jj_lib::merge::{Merge, MergedTreeValue};
 use jj_lib::merged_tree::{MergedTree, TreeDiffIterator};
 use jj_lib::repo::{ReadonlyRepo, Repo};
 use jj_lib::repo_path::RepoPath;
@@ -345,7 +345,7 @@ fn show_color_words_diff_line(
 fn diff_content(
     repo: &Arc<ReadonlyRepo>,
     path: &RepoPath,
-    value: &Merge<Option<TreeValue>>,
+    value: &MergedTreeValue,
 ) -> Result<Vec<u8>, CommandError> {
     match value.as_resolved() {
         Some(None) => Ok(vec![]),
@@ -379,7 +379,7 @@ fn diff_content(
     }
 }
 
-fn basic_diff_file_type(values: &Merge<Option<TreeValue>>) -> String {
+fn basic_diff_file_type(values: &MergedTreeValue) -> String {
     match values.as_resolved() {
         Some(None) => {
             panic!("absent path in diff");
@@ -408,8 +408,9 @@ pub fn show_color_words_diff(
 ) -> Result<(), CommandError> {
     let repo = workspace_command.repo();
     formatter.push_label("diff")?;
-    for (path, left_value, right_value) in tree_diff {
+    for (path, diff) in tree_diff {
         let ui_path = workspace_command.format_file_path(&path);
+        let (left_value, right_value) = diff?;
         if left_value.is_absent() {
             let right_content = diff_content(repo, &path, &right_value)?;
             let description = basic_diff_file_type(&right_value);
@@ -493,7 +494,7 @@ struct GitDiffPart {
 fn git_diff_part(
     repo: &Arc<ReadonlyRepo>,
     path: &RepoPath,
-    value: &Merge<Option<TreeValue>>,
+    value: &MergedTreeValue,
 ) -> Result<GitDiffPart, CommandError> {
     let mode;
     let hash;
@@ -686,8 +687,9 @@ pub fn show_git_diff(
 ) -> Result<(), CommandError> {
     let repo = workspace_command.repo();
     formatter.push_label("diff")?;
-    for (path, left_value, right_value) in tree_diff {
+    for (path, diff) in tree_diff {
         let path_string = path.to_internal_file_string();
+        let (left_value, right_value) = diff?;
         if left_value.is_absent() {
             let right_part = git_diff_part(repo, &path, &right_value)?;
             formatter.with_label("file_header", |formatter| {
@@ -746,7 +748,8 @@ pub fn show_diff_summary(
     tree_diff: TreeDiffIterator,
 ) -> io::Result<()> {
     formatter.with_label("diff", |formatter| {
-        for (repo_path, before, after) in tree_diff {
+        for (repo_path, diff) in tree_diff {
+            let (before, after) = diff.unwrap();
             if before.is_present() && after.is_present() {
                 writeln!(
                     formatter.labeled("modified"),
@@ -806,7 +809,8 @@ pub fn show_diff_stat(
     let mut stats: Vec<DiffStat> = vec![];
     let mut max_path_width = 0;
     let mut max_diffs = 0;
-    for (repo_path, left, right) in tree_diff {
+    for (repo_path, diff) in tree_diff {
+        let (left, right) = diff?;
         let path = workspace_command.format_file_path(&repo_path);
         let left_content = diff_content(workspace_command.repo(), &repo_path, &left)?;
         let right_content = diff_content(workspace_command.repo(), &repo_path, &right)?;
@@ -873,7 +877,8 @@ pub fn show_types(
     tree_diff: TreeDiffIterator,
 ) -> io::Result<()> {
     formatter.with_label("diff", |formatter| {
-        for (repo_path, before, after) in tree_diff {
+        for (repo_path, diff) in tree_diff {
+            let (before, after) = diff.unwrap();
             writeln!(
                 formatter.labeled("modified"),
                 "{}{} {}",
@@ -886,7 +891,7 @@ pub fn show_types(
     })
 }
 
-fn diff_summary_char(value: &Merge<Option<TreeValue>>) -> char {
+fn diff_summary_char(value: &MergedTreeValue) -> char {
     match value.as_resolved() {
         Some(None) => '-',
         Some(Some(TreeValue::File { .. })) => 'F',
